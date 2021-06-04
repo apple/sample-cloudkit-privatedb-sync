@@ -96,11 +96,11 @@ final class ViewModel: ObservableObject {
         let operation = CKFetchRecordZoneChangesOperation(recordZoneIDs: [zone.zoneID], configurationsByRecordZoneID: options)
 
         // The operation executes this closure for each record in the record zone with changes
-        operation.recordChangedBlock = { record in
-            if let contactName = record["name"] as? String {
+        operation.recordWasChangedBlock = { id, result in
+            if let record = try? result.get(), let contactName = record["name"] as? String {
                 DispatchQueue.main.async {
                     debugPrint("Adding contact: \(contactName)")
-                    changedRecords[record.recordID.recordName] = contactName
+                    changedRecords[id.recordName] = contactName
                 }
             }
         }
@@ -111,11 +111,9 @@ final class ViewModel: ObservableObject {
             debugPrint("Record \(recordID) of type \(recordType) deleted since last fetch.")
         }
 
-        operation.recordZoneFetchCompletionBlock = { zoneID, changeToken, _, _, error in
-            if let error = error {
-                debugPrint("Error fetching zone changes: \(error.localizedDescription)")
-                completionHandler?(.failure(error))
-            } else if let changeToken = changeToken {
+        operation.recordZoneFetchResultBlock = { zoneID, result in
+            switch result {
+            case .success((let changeToken, _, _)):
                 debugPrint("Finished zone fetch with token: \(changeToken)")
                 DispatchQueue.main.async {
                     // We have our change set and no errors, so update our local store.
@@ -129,6 +127,10 @@ final class ViewModel: ObservableObject {
 
                     completionHandler?(.success(()))
                 }
+
+            case .failure(let error):
+                debugPrint("Error fetching zone changes: \(error.localizedDescription)")
+                completionHandler?(.failure(error))
             }
         }
 
@@ -149,20 +151,24 @@ final class ViewModel: ObservableObject {
         let saveOperation = CKModifyRecordsOperation(recordsToSave: [newRecord])
         saveOperation.savePolicy = .allKeys
 
-        saveOperation.modifyRecordsCompletionBlock = { records, _, error in
-            if let error = error {
-                completionHandler(.failure(error))
-                debugPrint("Error saving new contact: \(error)")
-            } else {
-                DispatchQueue.main.async {
-                    records?.forEach { record in
-                        if let name = record["name"] as? String {
-                            self.contacts[record.recordID.recordName] = name
-                        }
+        var addedRecords: [CKRecord] = []
+
+        saveOperation.perRecordSaveBlock = { _, result in
+            if let record = try? result.get() {
+                addedRecords.append(record)
+            }
+        }
+
+        saveOperation.modifyRecordsResultBlock = { result in
+            DispatchQueue.main.async {
+                addedRecords.forEach { record in
+                    if let name = record["name"] as? String {
+                        self.contacts[record.recordID.recordName] = name
                     }
-                    self.saveLocalCache()
-                    completionHandler(.success(()))
                 }
+
+                self.saveLocalCache()
+                completionHandler(result)
             }
         }
 
@@ -181,16 +187,17 @@ final class ViewModel: ObservableObject {
         let recordID = CKRecord.ID(recordName: matchingID, zoneID: zone.zoneID)
         let deleteOperation = CKModifyRecordsOperation(recordIDsToDelete: [recordID])
 
-        deleteOperation.modifyRecordsCompletionBlock = { _, _, error in
-            if let error = error {
-                completionHandler(.failure(error))
-                debugPrint("Error deleting contact: \(error)")
-            } else {
-                DispatchQueue.main.async {
+        deleteOperation.modifyRecordsResultBlock = { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .failure(let error):
+                    debugPrint("Error deleting contact: \(error)")
+                case .success:
                     self.contacts.removeValue(forKey: matchingID)
                     self.saveLocalCache()
-                    completionHandler(.success(()))
                 }
+
+                completionHandler(result)
             }
         }
 
@@ -236,17 +243,19 @@ final class ViewModel: ObservableObject {
         }
 
         let createZoneOperation = CKModifyRecordZonesOperation(recordZonesToSave: [zone])
-        createZoneOperation.modifyRecordZonesCompletionBlock = { _, _, error in
-            if let error = error {
-                debugPrint("ERROR: Failed to create custom zone: \(error.localizedDescription)")
-                completionHandler?(.failure(error))
-            } else {
-                debugPrint("SUCCESS: Created custom zone.")
-                DispatchQueue.main.async {
+
+        createZoneOperation.modifyRecordZonesResultBlock = { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .failure(let error):
+                    debugPrint("ERROR: Failed to create custom zone: \(error.localizedDescription)")
+
+                case .success:
                     self.isZoneCreated = true
                     UserDefaults.standard.setValue(true, forKey: "isZoneCreated")
-                    completionHandler?(.success(()))
                 }
+
+                completionHandler?(result)
             }
         }
 
@@ -266,17 +275,30 @@ final class ViewModel: ObservableObject {
 
         // Check first if subscription has already been created.
         let fetchSubscription = CKFetchSubscriptionsOperation(subscriptionIDs: [subscriptionID])
-        fetchSubscription.fetchSubscriptionCompletionBlock = { subs, error in
-            if let error = error {
-                completionHandler?(.failure(error))
-            } else if subs?[subscriptionID] == nil {
-                self.createSubscription(completionHandler: completionHandler)
-            } else {
-                DispatchQueue.main.async {
-                    self.isSubscriptionCreated = true
-                    UserDefaults.standard.setValue(true, forKey: "isSubscribed")
+        var didFindSubscription = false
+
+        fetchSubscription.perSubscriptionResultBlock = { resultID, _ in
+            if resultID == subscriptionID {
+                didFindSubscription = true
+            }
+        }
+
+        fetchSubscription.fetchSubscriptionsResultBlock = { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .failure:
+                    completionHandler?(result)
+
+                case .success:
+                    if !didFindSubscription {
+                        // Subscription not found, so forward completion handler on and create it.
+                        self.createSubscription(completionHandler: completionHandler)
+                    } else {
+                        self.isSubscriptionCreated = true
+                        UserDefaults.standard.setValue(true, forKey: "isSubscribed")
+                        completionHandler?(result)
+                    }
                 }
-                completionHandler?(.success(()))
             }
         }
 
@@ -290,17 +312,19 @@ final class ViewModel: ObservableObject {
         subscription.notificationInfo = notificationInfo
 
         let subscriptionOperation = CKModifySubscriptionsOperation(subscriptionsToSave: [subscription])
-        subscriptionOperation.modifySubscriptionsCompletionBlock = { _, _, error in
-            if let error = error {
-                debugPrint("ERROR: Failed creating subscription: \(error)")
-                completionHandler?(.failure(error))
-            } else {
-                debugPrint("SUCCESS: Created subscription.")
-                DispatchQueue.main.async {
+        subscriptionOperation.modifySubscriptionsResultBlock = { result in
+            DispatchQueue.main.async {
+                switch result {
+                case .failure(let error):
+                    debugPrint("ERROR: Failed creating subscription: \(error)")
+
+                case .success:
+                    debugPrint("SUCCESS: Created subscription.")
                     self.isSubscriptionCreated = true
                     UserDefaults.standard.setValue(true, forKey: "isSubscribed")
-                    completionHandler?(.success(()))
                 }
+
+                completionHandler?(result)
             }
         }
 
