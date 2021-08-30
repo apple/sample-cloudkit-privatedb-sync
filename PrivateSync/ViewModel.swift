@@ -268,7 +268,14 @@ final class ViewModel: ObservableObject {
         let fetchSubscription = CKFetchSubscriptionsOperation(subscriptionIDs: [subscriptionID])
         fetchSubscription.fetchSubscriptionCompletionBlock = { subs, error in
             if let error = error {
-                completionHandler?(.failure(error))
+                // If the error is just that the subscription isn't found, continue on to create it.
+                if let ckError = error as? CKError,
+                   let partialError = ckError.partialErrorsByItemID?[subscriptionID] as? CKError,
+                   partialError.code == .unknownItem {
+                    self.createSubscription(completionHandler: completionHandler)
+                } else {
+                    completionHandler?(.failure(error))
+                }
             } else if subs?[subscriptionID] == nil {
                 self.createSubscription(completionHandler: completionHandler)
             } else {
