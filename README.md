@@ -6,7 +6,7 @@ This project demonstrates using CloudKit Database Subscriptions and push notific
 
 ### Prerequisites
 
-* A Mac with [Xcode 12](https://developer.apple.com/xcode/) (or later) installed is required to build and test this project.
+* A Mac with [Xcode 13](https://developer.apple.com/xcode/) (or later) installed is required to build and test this project.
 * An iOS device which will receive CloudKit change notifications is required to install and run the app on.
 * An active [Apple Developer Program membership](https://developer.apple.com/support/compare-memberships/) is needed to create a CloudKit container and sign the app to run on a device.
 
@@ -47,6 +47,10 @@ This project demonstrates using CloudKit Database Subscriptions and push notific
 * Receiving and handling a `CKNotification`.
 * Using a cached `CKServerChangeToken` to fetch only record changes and deletions since the last sync.
 * Adding, removing, and merging remote changes into a local cache, and reflecting those changes live in a UI.
+
+### Note on Swift Concurrency
+
+This project uses Swift concurrency APIs. A prior `completionHandler`-based implementation has been tagged [`pre-async`](https://github.com/apple/cloudkit-sample-privatedb-sync/tree/pre-async).
 
 ### Further Reading
 
