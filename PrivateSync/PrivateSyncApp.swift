@@ -44,13 +44,13 @@ final class PrivateSyncAppDelegate: NSObject, UIApplicationDelegate {
 
         debugPrint("Received zone notification: \(zoneNotification)")
 
-        PrivateSyncApp.vm.fetchLatestChanges { result in
-            switch result {
-            case .failure(let error):
+        Task {
+            do {
+                try await PrivateSyncApp.vm.fetchLatestChanges()
+                completionHandler(.newData)
+            } catch {
                 debugPrint("Error in fetchLatestChanges: \(error)")
                 completionHandler(.failed)
-            case .success:
-                completionHandler(.newData)
             }
         }
     }

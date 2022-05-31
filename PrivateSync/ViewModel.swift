@@ -16,9 +16,6 @@ final class ViewModel: ObservableObject {
     /// Contacts by name to be displayed by our View.
     @Published private(set) var contactNames: [String] = []
 
-    /// Boolean representing if we have fully initialized yet (creating custom zone, creating subscription).
-    @Published private(set) var isInitialized = false
-
     /// A dictionary mapping contact names (value) to ID (key).
     @Published private var contacts: [String: String] = [:]
 
@@ -35,11 +32,6 @@ final class ViewModel: ObservableObject {
     /// We use a change token to inform the server of the last time we had the most recent remote data.
     private(set) var lastChangeToken: CKServerChangeToken?
 
-    // MARK: Initialization State
-
-    @Published private var isZoneCreated = false
-    @Published private var isSubscriptionCreated = false
-
     // MARK: Subscribers
 
     private var subscribers: [AnyCancellable] = []
@@ -47,154 +39,94 @@ final class ViewModel: ObservableObject {
     // MARK: - Public Functions
 
     init() {
-        // Determine live initialization state by combining zone creation and subscription creation state.
-        Publishers.CombineLatest($isZoneCreated, $isSubscriptionCreated)
-            .map { $0 && $1 }
-            .assign(to: &$isInitialized)
-
         // For simplicity, observe the local cache and publish just the names (values) to the contactNames published var.
         $contacts.map { $0.values.sorted() }
             .assign(to: &$contactNames)
     }
 
-    /// Performs all required initialization and fetches the latest changes from the CloudKit server.
-    func initializeAndFetchLatestChanges() {
+    /// Loads any stored cache and change token, and creates custom zone and subscription as needed.
+    func initialize() async throws {
         loadLocalCache()
         loadLastChangeToken()
 
-        // We need to create our zone first, as our subscription will reference the zone ID to track changes in.
-        createZoneIfNeeded { result in
-            guard case .success = result else {
-                return
-            }
-
-            self.createSubscriptionIfNeeded()
-        }
-
-        // When isInitialized becomes true, we start fetching the latest changes.
-        let sub = $isInitialized
-            .filter { $0 }
-            .sink { _ in
-                self.fetchLatestChanges()
-            }
-        subscribers.append(sub)
+        try await createZoneIfNeeded()
+        try await createSubscriptionIfNeeded()
     }
 
     /// Using the last known change token, retrieve changes on the zone since the last time we pulled from iCloud.
     /// If `lastChangeToken` is `nil`, all records will be retrieved.
-    /// - Parameter completionHandler: An optional completion handler to handle the success or failure of the operation.
-    func fetchLatestChanges(completionHandler: ((Result<Void, Error>) -> Void)? = nil) {
-        let options: [CKRecordZone.ID: CKFetchRecordZoneChangesOperation.ZoneConfiguration] = [
-            zone.zoneID: .init(previousServerChangeToken: lastChangeToken)
-        ]
+    func fetchLatestChanges() async throws {
+        /// `recordZoneChanges` can return multiple consecutive changesets before completing, so
+        /// we use a loop to process multiple results if needed, indicated by the `moreComing` flag.
+        var awaitingChanges = true
 
-        // Instead of performing changes as records come in one by one, we'll store them and update
-        // our local store after completion, confirming no errors occurred.
-        var changedRecords: [String: String] = [:]
-        var deletedRecordIDs: [String] = []
+        while awaitingChanges {
+            /// Fetch changeset for the last known change token.
+            let changes = try await database.recordZoneChanges(inZoneWith: zone.zoneID, since: lastChangeToken)
 
-        let operation = CKFetchRecordZoneChangesOperation(recordZoneIDs: [zone.zoneID], configurationsByRecordZoneID: options)
+            /// Convert changes to `CKRecord` objects and deleted IDs.
+            let changedRecords = changes.modificationResultsByID.compactMapValues { try? $0.get().record }
+            let deletedRecordIDs = changes.deletions.map { $0.recordID.recordName }
 
-        // The operation executes this closure for each record in the record zone with changes
-        operation.recordChangedBlock = { record in
-            if let contactName = record["name"] as? String {
-                DispatchQueue.main.async {
-                    debugPrint("Adding contact: \(contactName)")
-                    changedRecords[record.recordID.recordName] = contactName
+            /// Update local state, processing changes/additions and deletions.
+            changedRecords.forEach { id, record in
+                if let contactName = record["name"] as? String {
+                    contacts[id.recordName] = contactName
                 }
             }
+
+            deletedRecordIDs.forEach { contacts.removeValue(forKey: $0) }
+
+            /// Save our new change token representing this point in time.
+            saveChangeToken(changes.changeToken)
+
+            /// Write updated local cache to disk.
+            saveLocalCache()
+
+            /// If there are more changes coming, we need to repeat this process with the new token.
+            /// This is indicated by the returned changeset `moreComing` flag.
+            awaitingChanges = changes.moreComing
         }
-
-        // For each record deleted, store its ID to on completion update the local cache.
-        operation.recordWithIDWasDeletedBlock = { recordID, recordType in
-            deletedRecordIDs.append(recordID.recordName)
-            debugPrint("Record \(recordID) of type \(recordType) deleted since last fetch.")
-        }
-
-        operation.recordZoneFetchCompletionBlock = { zoneID, changeToken, _, _, error in
-            if let error = error {
-                debugPrint("Error fetching zone changes: \(error.localizedDescription)")
-                completionHandler?(.failure(error))
-            } else if let changeToken = changeToken {
-                debugPrint("Finished zone fetch with token: \(changeToken)")
-                DispatchQueue.main.async {
-                    // We have our change set and no errors, so update our local store.
-                    self.contacts.merge(changedRecords) { _, new in new }
-                    // Remove any deleted records by ID.
-                    deletedRecordIDs.forEach { self.contacts.removeValue(forKey: $0) }
-                    // Save our new change token representing this point in time.
-                    self.saveChangeToken(changeToken)
-                    // Write our local cache to disk.
-                    self.saveLocalCache()
-
-                    completionHandler?(.success(()))
-                }
-            }
-        }
-
-        database.add(operation)
     }
 
     /// Creates a new Contact record in the local cache as well as on the remote database.
     /// For simplicity, if the remote operation fails, no local update occurs.
     /// - Parameters:
     ///   - name: The name of the new contact.
-    ///   - completionHandler: Handler to process success or failure.
-    func addContactToLocalAndRemote(name: String, completionHandler: @escaping (Result<Void, Error>) -> Void) {
+    func addContact(name: String) async throws {
         // We need to build a CKRecord of our new Contact using our custom zone and record type.
         let newRecordID = CKRecord.ID(zoneID: zone.zoneID)
         let newRecord = CKRecord(recordType: "Contact", recordID: newRecordID)
         newRecord["name"] = name
 
-        let saveOperation = CKModifyRecordsOperation(recordsToSave: [newRecord])
-        saveOperation.savePolicy = .allKeys
+        let savedRecord = try await database.save(newRecord)
 
-        saveOperation.modifyRecordsCompletionBlock = { records, _, error in
-            if let error = error {
-                completionHandler(.failure(error))
-                debugPrint("Error saving new contact: \(error)")
-            } else {
-                DispatchQueue.main.async {
-                    records?.forEach { record in
-                        if let name = record["name"] as? String {
-                            self.contacts[record.recordID.recordName] = name
-                        }
-                    }
-                    self.saveLocalCache()
-                    completionHandler(.success(()))
-                }
-            }
-        }
-
-        database.add(saveOperation)
+        /// At this point, the record has been successfully saved and we can add it to our local cache.
+        /// If the `save` operation fails, an error is thrown before reaching this point.
+        contacts[savedRecord.recordID.recordName] = name
+        saveLocalCache()
     }
 
-    func deleteContactFromLocalAndRemote(name: String, completionHandler: @escaping (Result<Void, Error>) -> Void) {
+    /// Deletes a Contact record if found by name in the local cache as well as on the remote database.
+    /// For simplicity, if the remote operation fails, no local update occurs.
+    /// - Parameters:
+    ///   - name: The name of the contact to delete.
+    func deleteContact(name: String) async throws {
         // In this contrived example, Contact records only store a name, so rather than requiring the
         // unique ID to delete a Contact, we'll use the first ID that matches the name to delete.
         guard let matchingID = contacts.first(where: { _, value in name == value })?.key else {
             debugPrint("Contact not found on deletion for name: \(name)")
-            completionHandler(.failure(PrivateSyncError.contactNotFound))
-            return
+            throw PrivateSyncError.contactNotFound
         }
 
         let recordID = CKRecord.ID(recordName: matchingID, zoneID: zone.zoneID)
-        let deleteOperation = CKModifyRecordsOperation(recordIDsToDelete: [recordID])
 
-        deleteOperation.modifyRecordsCompletionBlock = { _, _, error in
-            if let error = error {
-                completionHandler(.failure(error))
-                debugPrint("Error deleting contact: \(error)")
-            } else {
-                DispatchQueue.main.async {
-                    self.contacts.removeValue(forKey: matchingID)
-                    self.saveLocalCache()
-                    completionHandler(.success(()))
-                }
-            }
-        }
+        try await database.deleteRecord(withID: recordID)
 
-        database.add(deleteOperation)
+        /// At this point, the record has been successfully deleted.
+        /// If the `deleteRecord` operation fails, an error is thrown before reaching this point.
+        contacts.removeValue(forKey: matchingID)
+        saveLocalCache()
     }
 
     // MARK: - Local Caching
@@ -226,92 +158,44 @@ final class ViewModel: ObservableObject {
     // MARK: - CloudKit Initialization Helpers
 
     /// Creates the custom zone defined by the `zone` property if needed.
-    /// - Parameter completionHandler: An optional completion handler to track operation completion or errors.
-    func createZoneIfNeeded(completionHandler: ((Result<Void, Error>) -> Void)? = nil) {
+    func createZoneIfNeeded() async throws {
         // Avoid the operation if this has already been done.
         guard !UserDefaults.standard.bool(forKey: "isZoneCreated") else {
-            isZoneCreated = true
-            completionHandler?(.success(()))
             return
         }
 
-        let createZoneOperation = CKModifyRecordZonesOperation(recordZonesToSave: [zone])
-        createZoneOperation.modifyRecordZonesCompletionBlock = { _, _, error in
-            if let error = error {
-                debugPrint("ERROR: Failed to create custom zone: \(error.localizedDescription)")
-                completionHandler?(.failure(error))
-            } else {
-                debugPrint("SUCCESS: Created custom zone.")
-                DispatchQueue.main.async {
-                    self.isZoneCreated = true
-                    UserDefaults.standard.setValue(true, forKey: "isZoneCreated")
-                    completionHandler?(.success(()))
-                }
-            }
+        do {
+            _ = try await database.modifyRecordZones(saving: [zone], deleting: [])
+        } catch {
+            print("ERROR: Failed to create custom zone: \(error.localizedDescription)")
+            throw error
         }
 
-        database.add(createZoneOperation)
+        UserDefaults.standard.setValue(true, forKey: "isZoneCreated")
     }
 
     /// Creates a subscription if needed that tracks changes to our custom zone.
-    /// - Parameter completionHandler: An optional completion handler to track operation completion or errors.
-    private func createSubscriptionIfNeeded(completionHandler: ((Result<Void, Error>) -> Void)? = nil) {
+    func createSubscriptionIfNeeded() async throws {
         guard !UserDefaults.standard.bool(forKey: "isSubscribed") else {
-            isSubscriptionCreated = true
-            completionHandler?(.success(()))
             return
         }
 
-        let subscriptionID = self.subscriptionID
-
-        // Check first if subscription has already been created.
-        let fetchSubscription = CKFetchSubscriptionsOperation(subscriptionIDs: [subscriptionID])
-        fetchSubscription.fetchSubscriptionCompletionBlock = { subs, error in
-            if let error = error {
-                // If the error is just that the subscription isn't found, continue on to create it.
-                if let ckError = error as? CKError,
-                   let partialError = ckError.partialErrorsByItemID?[subscriptionID] as? CKError,
-                   partialError.code == .unknownItem {
-                    self.createSubscription(completionHandler: completionHandler)
-                } else {
-                    completionHandler?(.failure(error))
-                }
-            } else if subs?[subscriptionID] == nil {
-                self.createSubscription(completionHandler: completionHandler)
-            } else {
-                DispatchQueue.main.async {
-                    self.isSubscriptionCreated = true
-                    UserDefaults.standard.setValue(true, forKey: "isSubscribed")
-                }
-                completionHandler?(.success(()))
-            }
+        // First check if the subscription has already been created.
+        // If a subscription is returned, we don't need to create one.
+        let foundSubscription = try? await database.subscription(for: subscriptionID)
+        guard foundSubscription == nil else {
+            UserDefaults.standard.setValue(true, forKey: "isSubscribed")
+            return
         }
 
-        database.add(fetchSubscription)
-    }
-
-    private func createSubscription(completionHandler: ((Result<Void, Error>) -> Void)? = nil) {
+        // No subscription created yet, so create one here, reporting and passing along any errors.
         let subscription = CKRecordZoneSubscription(zoneID: zone.zoneID, subscriptionID: subscriptionID)
         let notificationInfo = CKSubscription.NotificationInfo()
         notificationInfo.shouldSendContentAvailable = true
         subscription.notificationInfo = notificationInfo
 
-        let subscriptionOperation = CKModifySubscriptionsOperation(subscriptionsToSave: [subscription])
-        subscriptionOperation.modifySubscriptionsCompletionBlock = { _, _, error in
-            if let error = error {
-                debugPrint("ERROR: Failed creating subscription: \(error)")
-                completionHandler?(.failure(error))
-            } else {
-                debugPrint("SUCCESS: Created subscription.")
-                DispatchQueue.main.async {
-                    self.isSubscriptionCreated = true
-                    UserDefaults.standard.setValue(true, forKey: "isSubscribed")
-                    completionHandler?(.success(()))
-                }
-            }
-        }
-
-        database.add(subscriptionOperation)
+        _ = try await database.modifySubscriptions(saving: [subscription], deleting: [])
+        UserDefaults.standard.setValue(true, forKey: "isSubscribed")
     }
 
     // MARK: - Helper Error Type

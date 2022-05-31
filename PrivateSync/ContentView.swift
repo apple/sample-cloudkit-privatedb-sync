@@ -17,11 +17,20 @@ struct ContentView: View {
                     Text($0)
                 }.onDelete(perform: deleteContacts)
             }
-            .onAppear { vm.initializeAndFetchLatestChanges() }
+            .onAppear {
+                Task {
+                    try? await vm.initialize()
+                    try? await vm.fetchLatestChanges()
+                }
+            }
             .navigationTitle("Contacts")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button(action: { vm.fetchLatestChanges() }) { Image(systemName: "arrow.clockwise" )}
+                    Button(action: {
+                        Task {
+                            try? await vm.fetchLatestChanges()
+                        }
+                    }) { Image(systemName: "arrow.clockwise" )}
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button(action: { self.isAddingContact = true }) { Image(systemName: "plus") }
@@ -32,16 +41,18 @@ struct ContentView: View {
 
     /// View for adding a new Contact.
     private func createAddContactView() -> some View {
-        let addAction = {
-            vm.addContactToLocalAndRemote(name: nameInput) { _ in
+        let addAction: () -> Void = {
+            Task {
+                try? await vm.addContact(name: nameInput)
                 isAddingContact = false
-                vm.fetchLatestChanges()
+                try? await vm.fetchLatestChanges()
             }
         }
 
         return NavigationView {
             VStack {
-                TextField("Name", text: $nameInput, onCommit: addAction)
+                TextField("Name", text: $nameInput)
+                    .onSubmit(addAction)
                     .font(.body)
                     .textContentType(.name)
                     .padding(.horizontal, 16)
@@ -65,7 +76,11 @@ struct ContentView: View {
         }
 
         let contactName = vm.contactNames[firstIndex]
-        vm.deleteContactFromLocalAndRemote(name: contactName) { _ in }
+
+        Task {
+            try? await vm.deleteContact(name: contactName)
+            try? await vm.fetchLatestChanges()
+        }
     }
 }
 
