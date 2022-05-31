@@ -18,7 +18,7 @@ struct ContentView: View {
                 }.onDelete(perform: deleteContacts)
             }
             .onAppear {
-                async {
+                Task {
                     try? await vm.initialize()
                     try? await vm.fetchLatestChanges()
                 }
@@ -27,7 +27,7 @@ struct ContentView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button(action: {
-                        async {
+                        Task {
                             try? await vm.fetchLatestChanges()
                         }
                     }) { Image(systemName: "arrow.clockwise" )}
@@ -42,7 +42,7 @@ struct ContentView: View {
     /// View for adding a new Contact.
     private func createAddContactView() -> some View {
         let addAction: () -> Void = {
-            async {
+            Task {
                 try? await vm.addContact(name: nameInput)
                 isAddingContact = false
                 try? await vm.fetchLatestChanges()
@@ -77,7 +77,7 @@ struct ContentView: View {
 
         let contactName = vm.contactNames[firstIndex]
 
-        async {
+        Task {
             try? await vm.deleteContact(name: contactName)
             try? await vm.fetchLatestChanges()
         }

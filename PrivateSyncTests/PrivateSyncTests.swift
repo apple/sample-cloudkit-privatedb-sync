@@ -13,7 +13,7 @@ class PrivateSyncTests: XCTestCase {
         let vm = ViewModel()
         let expectation = self.expectation(description: "Expect successful zone creation.")
 
-        async {
+        Task {
             do {
                 try await vm.createZoneIfNeeded()
             } catch {

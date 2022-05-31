@@ -44,7 +44,7 @@ final class PrivateSyncAppDelegate: NSObject, UIApplicationDelegate {
 
         debugPrint("Received zone notification: \(zoneNotification)")
 
-        async {
+        Task {
             do {
                 try await PrivateSyncApp.vm.fetchLatestChanges()
                 completionHandler(.newData)

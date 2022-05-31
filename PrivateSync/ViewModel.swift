@@ -165,7 +165,7 @@ final class ViewModel: ObservableObject {
         }
 
         do {
-            _ = try await database.modifyRecordZones(saving: [zone])
+            _ = try await database.modifyRecordZones(saving: [zone], deleting: [])
         } catch {
             print("ERROR: Failed to create custom zone: \(error.localizedDescription)")
             throw error
@@ -194,7 +194,7 @@ final class ViewModel: ObservableObject {
         notificationInfo.shouldSendContentAvailable = true
         subscription.notificationInfo = notificationInfo
 
-        _ = try await database.modifySubscriptions(saving: [subscription])
+        _ = try await database.modifySubscriptions(saving: [subscription], deleting: [])
         UserDefaults.standard.setValue(true, forKey: "isSubscribed")
     }
 
