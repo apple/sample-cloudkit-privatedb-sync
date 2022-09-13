@@ -46,7 +46,7 @@ final class ViewModel: ObservableObject {
 
     /// Loads any stored cache and change token, and creates custom zone and subscription as needed.
     func initialize() async throws {
-        loadLocalCache()
+        await loadLocalCache()
         loadLastChangeToken()
 
         try await createZoneIfNeeded()
@@ -69,19 +69,20 @@ final class ViewModel: ObservableObject {
             let deletedRecordIDs = changes.deletions.map { $0.recordID.recordName }
 
             /// Update local state, processing changes/additions and deletions.
-            changedRecords.forEach { id, record in
-                if let contactName = record["name"] as? String {
-                    contacts[id.recordName] = contactName
+            await MainActor.run {
+                changedRecords.forEach { id, record in
+                    if let contactName = record["name"] as? String {
+                        contacts[id.recordName] = contactName
+                    }
                 }
+                deletedRecordIDs.forEach { contacts.removeValue(forKey: $0) }
             }
-
-            deletedRecordIDs.forEach { contacts.removeValue(forKey: $0) }
 
             /// Save our new change token representing this point in time.
             saveChangeToken(changes.changeToken)
 
             /// Write updated local cache to disk.
-            saveLocalCache()
+            await saveLocalCache()
 
             /// If there are more changes coming, we need to repeat this process with the new token.
             /// This is indicated by the returned changeset `moreComing` flag.
@@ -103,8 +104,10 @@ final class ViewModel: ObservableObject {
 
         /// At this point, the record has been successfully saved and we can add it to our local cache.
         /// If the `save` operation fails, an error is thrown before reaching this point.
-        contacts[savedRecord.recordID.recordName] = name
-        saveLocalCache()
+        await MainActor.run {
+            contacts[savedRecord.recordID.recordName] = name
+        }
+        await saveLocalCache()
     }
 
     /// Deletes a Contact record if found by name in the local cache as well as on the remote database.
@@ -125,18 +128,25 @@ final class ViewModel: ObservableObject {
 
         /// At this point, the record has been successfully deleted.
         /// If the `deleteRecord` operation fails, an error is thrown before reaching this point.
-        contacts.removeValue(forKey: matchingID)
-        saveLocalCache()
+        await MainActor.run {
+            contacts.removeValue(forKey: matchingID)
+        }
+        
+        await saveLocalCache()
     }
 
     // MARK: - Local Caching
 
-    private func loadLocalCache() {
-        contacts = UserDefaults.standard.dictionary(forKey: "contacts") as? [String: String] ?? [:]
+    private func loadLocalCache() async {
+        await MainActor.run {
+            contacts = UserDefaults.standard.dictionary(forKey: "contacts") as? [String: String] ?? [:]
+        }
     }
 
-    private func saveLocalCache() {
-        UserDefaults.standard.set(contacts, forKey: "contacts")
+    private func saveLocalCache() async {
+        await MainActor.run {
+            UserDefaults.standard.set(contacts, forKey: "contacts")
+        }
     }
 
     private func loadLastChangeToken() {
