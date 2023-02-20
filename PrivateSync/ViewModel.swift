@@ -78,11 +78,11 @@ final class ViewModel: ObservableObject {
                 deletedRecordIDs.forEach { contacts.removeValue(forKey: $0) }
             }
 
-            /// Save our new change token representing this point in time.
-            saveChangeToken(changes.changeToken)
-
             /// Write updated local cache to disk.
             await saveLocalCache()
+
+            /// Save our new change token representing this point in time.
+            saveChangeToken(changes.changeToken)
 
             /// If there are more changes coming, we need to repeat this process with the new token.
             /// This is indicated by the returned changeset `moreComing` flag.
