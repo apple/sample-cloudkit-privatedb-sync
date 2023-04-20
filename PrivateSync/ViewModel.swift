@@ -68,11 +68,17 @@ final class ViewModel: ObservableObject {
             let changedRecords = changes.modificationResultsByID.compactMapValues { try? $0.get().record }
             let deletedRecordIDs = changes.deletions.map { $0.recordID.recordName }
 
+            /// `CKRecord` does not yet conform to `Sendable`, so to avoid it crossing the actor boundary
+            /// we pull out what we need from changed/new records before.
+            let changedRecordIDsAndNames: [(String, String?)] = {
+                changedRecords.map { id, record in (id.recordName, record["name"]) }
+            }()
+
             /// Update local state, processing changes/additions and deletions.
             await MainActor.run {
-                changedRecords.forEach { id, record in
-                    if let contactName = record["name"] as? String {
-                        contacts[id.recordName] = contactName
+                changedRecordIDsAndNames.forEach { id, name in
+                    if let name = name {
+                        contacts[id] = name
                     }
                 }
                 deletedRecordIDs.forEach { contacts.removeValue(forKey: $0) }
@@ -101,11 +107,12 @@ final class ViewModel: ObservableObject {
         newRecord["name"] = name
 
         let savedRecord = try await database.save(newRecord)
+        let savedRecordName = savedRecord.recordID.recordName
 
         /// At this point, the record has been successfully saved and we can add it to our local cache.
         /// If the `save` operation fails, an error is thrown before reaching this point.
         await MainActor.run {
-            contacts[savedRecord.recordID.recordName] = name
+            contacts[savedRecordName] = name
         }
         await saveLocalCache()
     }
@@ -129,7 +136,7 @@ final class ViewModel: ObservableObject {
         /// At this point, the record has been successfully deleted.
         /// If the `deleteRecord` operation fails, an error is thrown before reaching this point.
         await MainActor.run {
-            contacts.removeValue(forKey: matchingID)
+            _ = contacts.removeValue(forKey: matchingID)
         }
         
         await saveLocalCache()
