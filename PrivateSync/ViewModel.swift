@@ -177,7 +177,7 @@ final class ViewModel: ObservableObject {
     /// Creates the custom zone defined by the `zone` property if needed.
     func createZoneIfNeeded() async throws {
         // Avoid the operation if this has already been done.
-        guard !UserDefaults.standard.bool(forKey: "isZoneCreated") else {
+        guard UserDefaults.standard.bool(forKey: "isZoneCreated") else {
             return
         }
 
@@ -193,7 +193,7 @@ final class ViewModel: ObservableObject {
 
     /// Creates a subscription if needed that tracks changes to our custom zone.
     func createSubscriptionIfNeeded() async throws {
-        guard !UserDefaults.standard.bool(forKey: "isSubscribed") else {
+        guard UserDefaults.standard.bool(forKey: "isSubscribed") else {
             return
         }
 
