@@ -19,8 +19,13 @@ struct ContentView: View {
             }
             .onAppear {
                 Task {
-                    try? await vm.initialize()
-                    try? await vm.fetchLatestChanges()
+                    do {
+                        try await vm.initialize()
+                    } catch {
+                        fatalError("Error initializing: \(error). This is a fatal error.")
+                    }
+
+                    await fetchChanges()
                 }
             }
             .navigationTitle("Contacts")
@@ -28,7 +33,7 @@ struct ContentView: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button(action: {
                         Task {
-                            try? await vm.fetchLatestChanges()
+                            await fetchChanges()
                         }
                     }) { Image(systemName: "arrow.clockwise" )}
                 }
@@ -43,9 +48,13 @@ struct ContentView: View {
     private func createAddContactView() -> some View {
         let addAction: () -> Void = {
             Task {
-                try? await vm.addContact(name: nameInput)
+                do {
+                    try await vm.addContact(name: nameInput)
+                } catch {
+                    print("An error occurred adding contact to CloudKit: \(error)")
+                }
                 isAddingContact = false
-                try? await vm.fetchLatestChanges()
+                await fetchChanges()
             }
         }
 
@@ -70,6 +79,14 @@ struct ContentView: View {
         }.onDisappear { nameInput = "" }
     }
 
+    private func fetchChanges() async {
+        do {
+            try await vm.fetchLatestChanges()
+        } catch {
+            print("An error occurred fetching latest changes from CloudKit: \(error)")
+        }
+    }
+
     private func deleteContacts(at indexSet: IndexSet) {
         guard let firstIndex = indexSet.first else {
             return
@@ -78,8 +95,12 @@ struct ContentView: View {
         let contactName = vm.contactNames[firstIndex]
 
         Task {
-            try? await vm.deleteContact(name: contactName)
-            try? await vm.fetchLatestChanges()
+            do {
+                try await vm.deleteContact(name: contactName)
+                await fetchChanges()
+            } catch {
+                print("An error occurred removing contact from CloudKit: \(error)")
+            }
         }
     }
 }
